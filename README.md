@@ -4,15 +4,15 @@ A local web app that displays your YouTube subscription videos sorted by a nowca
 
 ## Ranking Algorithm
 
-The unified performance score is point-in-time and optimized for sporadic scraping (for example 1-2 runs/day):
+Videos are ranked by a **core score** designed for ad hoc runs and then filtered by the selected facet window (2 days, 1 week, 2 weeks, 1 month). This means each facet shows the strongest videos **within that window**, not a globally recency-biased list.
+
+Core score components:
 
 1. **Nowcast vs Expected (55% weight)**
    - Compares current views to age-adjusted expected views from each channel's `baseline_48h`.
-   - Surfaces videos that are overperforming *right now*, including very new uploads.
 
-2. **Velocity Shock (25% weight)**
+2. **Velocity Shock (20% weight)**
    - Compares current views/hour to expected slope at the video's current age.
-   - Rewards sudden acceleration without requiring 24h of data.
 
 3. **Subscriber Reach (15% weight)**
    - Views relative to subscriber count with diminishing returns.
@@ -23,6 +23,10 @@ The unified performance score is point-in-time and optimized for sporadic scrapi
 Score modifiers:
 - **Confidence multiplier (0.75-1.05)** lowers rank impact for weak parse confidence/stale baselines.
 - **Early breakout boost (up to +0.12)** helps very new videos that are simultaneously strong in nowcast and velocity.
+
+Notes:
+- Facet sorting uses facet score keys (`day`, `week`, `twoweeks`, `month`) backed by the core score.
+- Freshness diagnostics are still recorded in details for transparency, but recency is not applied as a hard rank penalty across wider windows.
 
 ## Overview
 

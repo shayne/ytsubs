@@ -126,6 +126,7 @@ def _duration_prior(duration_seconds: int | None) -> float:
 
 
 def _freshness_relevance(age_hours: float) -> float:
+    """Diagnostic-only recency signal kept for explainability in performance details."""
     if age_hours <= 24:
         return 1.0
     if age_hours <= 72:
@@ -139,16 +140,9 @@ def _freshness_relevance(age_hours: float) -> float:
     return 0.45
 
 
-def _velocity_weight(age_hours: float) -> float:
-    if age_hours <= 24:
-        return 0.25
-    if age_hours <= 72:
-        return 0.20
-    if age_hours <= 168:
-        return 0.12
-    if age_hours <= 336:
-        return 0.06
-    return 0.02
+def _velocity_weight() -> float:
+    # Keep velocity importance stable across age windows so each facet can rank by best-in-window.
+    return 0.20
 
 
 def _confidence_multiplier(
@@ -184,6 +178,15 @@ def _early_breakout_boost(age_hours: float, relative_nowcast: float, velocity_sh
         return 0.0
 
     return _clamp(0.03 * math.log1p(relative_nowcast * velocity_shock), 0.0, 0.12)
+
+
+def _facet_scores(core_score: float) -> dict[str, float]:
+    return {
+        "day": float(core_score),
+        "week": float(core_score),
+        "twoweeks": float(core_score),
+        "month": float(core_score),
+    }
 
 
 def _load_rankable_rows(cursor: sqlite3.Cursor) -> list[sqlite3.Row]:
@@ -310,7 +313,7 @@ def get_videos() -> list[dict[str, object]]:
             )
             early_breakout_boost = _early_breakout_boost(age_hours, relative_nowcast, velocity_shock)
             freshness_relevance = _freshness_relevance(age_hours)
-            velocity_weight = _velocity_weight(age_hours)
+            velocity_weight = _velocity_weight()
 
             base_score = (
                 0.55 * _norm_ratio(relative_nowcast)
@@ -318,7 +321,11 @@ def get_videos() -> list[dict[str, object]]:
                 + 0.15 * _norm_reach(subscriber_reach)
                 + 0.05 * duration_prior
             )
-            performance_score = ((base_score * confidence_multiplier) + early_breakout_boost) * freshness_relevance
+            core_score = (base_score * confidence_multiplier) + early_breakout_boost
+            scores = {
+                "core": float(core_score),
+                "by_facet": _facet_scores(core_score),
+            }
 
             video = {
                 "id": row["id"],
@@ -335,7 +342,9 @@ def get_videos() -> list[dict[str, object]]:
                     "thumbnail": row["channel_thumbnail"],
                     "average_views": int(baseline_48h),
                 },
-                "performance_score": float(performance_score),
+                # `performance_score` is maintained as a compatibility alias of the core score.
+                "performance_score": float(core_score),
+                "scores": scores,
                 "performance_details": {
                     "relative_performance": float(relative_nowcast),
                     "subscriber_reach": float(subscriber_reach),
@@ -357,7 +366,7 @@ def get_videos() -> list[dict[str, object]]:
 
             videos.append(video)
 
-        videos.sort(key=lambda v: (float(v["performance_score"]), str(v["published_date"])), reverse=True)
+        videos.sort(key=lambda v: (float(v["scores"]["core"]), str(v["published_date"])), reverse=True)
 
         db.close()
         return videos

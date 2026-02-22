@@ -366,10 +366,23 @@
               return false;
             }
           })
-          .sort((a, b) => b.performance_score - a.performance_score);
+          .sort(
+            (a, b) =>
+              getFacetScore(b, selectedTimeRange.value) -
+              getFacetScore(a, selectedTimeRange.value)
+          );
 
         return filtered;
       });
+
+      function getFacetScore(video, facetKey = selectedTimeRange.value) {
+        return (
+          video?.scores?.by_facet?.[facetKey] ??
+          video?.scores?.core ??
+          video?.performance_score ??
+          0
+        );
+      }
 
       function formatNumber(num) {
         if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
@@ -554,11 +567,11 @@
                       <div
                         class="popularity-score"
                         style="background-color: ${getPerformanceColor(
-                          video.performance_score
+                          getFacetScore(video)
                         )}"
                         onClick=${(e) => e.preventDefault()}
                       >
-                        ${formatPerformance(video.performance_score)}
+                        ${formatPerformance(getFacetScore(video))}
                         <span class="info-icon">ⓘ</span>
                         <div class="performance-popover">
                           <div class="performance-stat">

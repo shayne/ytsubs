@@ -150,6 +150,10 @@ class GenerateFeedNowcastTests(unittest.TestCase):
         videos = generate_feed.get_videos()
         self.assertGreaterEqual(len(videos), 2)
         self.assertEqual(videos[0]["id"], "breakout")
+        self.assertIn("scores", videos[0])
+        self.assertIn("core", videos[0]["scores"])
+        self.assertIn("by_facet", videos[0]["scores"])
+        self.assertIn("month", videos[0]["scores"]["by_facet"])
 
     def test_latest_observation_is_used_for_current_views(self) -> None:
         self._insert_channel("UCLATEST", subscribers=120_000, baseline_48h=40_000)
@@ -188,22 +192,24 @@ class GenerateFeedNowcastTests(unittest.TestCase):
         self.assertTrue(output_path.exists())
         html = output_path.read_text(encoding="utf-8")
         self.assertIn("feed-video", html)
+        self.assertIn('"scores"', html)
+        self.assertIn('"by_facet"', html)
 
-    def test_recent_breakout_beats_stale_outlier(self) -> None:
+    def test_strong_older_video_can_outrank_recent_video_within_month_window(self) -> None:
         self._insert_channel("UCRECENT", subscribers=300_000, baseline_48h=90_000)
         self._insert_channel("UCSTALE", subscribers=300_000, baseline_48h=90_000)
 
-        # Strong current breakout.
+        # Decent recent breakout.
         self._insert_video("recent-breakout", channel_id="UCRECENT", published_hours_ago=18)
-        self._insert_observation(video_id="recent-breakout", views=85_000, age_hours=18.0)
+        self._insert_observation(video_id="recent-breakout", views=55_000, age_hours=18.0)
 
-        # Huge but stale outlier that should not dominate point-in-time ranking.
+        # Older but much stronger month-window performance.
         self._insert_video("stale-outlier", channel_id="UCSTALE", published_hours_ago=696)
         self._insert_observation(video_id="stale-outlier", views=3_500_000, age_hours=696.0)
 
         videos = generate_feed.get_videos()
         ids = [video["id"] for video in videos]
-        self.assertLess(ids.index("recent-breakout"), ids.index("stale-outlier"))
+        self.assertLess(ids.index("stale-outlier"), ids.index("recent-breakout"))
 
 
 if __name__ == "__main__":
