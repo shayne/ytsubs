@@ -32,12 +32,18 @@ class ChannelStatsScraper(BaseScraper):
             # Remove any leading text like "Verified" or channel name
             count = re.sub(r'^.*?(\d)', r'\1', count)
             
-            if 'k' in count:
-                # Handle thousands (e.g., '500K', '1.2K')
-                number = float(count.replace('k', '')) * 1000
-            elif 'm' in count:
-                # Handle millions (e.g., '1.2M', '24M')
-                number = float(count.replace('m', '')) * 1000000
+            if 'k' in count or 'thousand' in count:
+                # Handle thousands (e.g., '500K', '290 thousand')
+                normalized = count.replace('thousand', '').replace('k', '').strip()
+                number = float(normalized) * 1000
+            elif 'm' in count or 'million' in count:
+                # Handle millions (e.g., '1.2M', '7.14 million')
+                normalized = count.replace('million', '').replace('m', '').strip()
+                number = float(normalized) * 1000000
+            elif 'b' in count or 'billion' in count:
+                # Handle billions (e.g., '1.2B', '1.2 billion')
+                normalized = count.replace('billion', '').replace('b', '').strip()
+                number = float(normalized) * 1000000000
             else:
                 # Handle regular numbers (e.g., '500')
                 number = float(count)
@@ -93,27 +99,31 @@ class ChannelStatsScraper(BaseScraper):
                     if not channel_id:
                         continue
                     
-                    # Get subscriber count from videoCountText
+                    # YouTube currently puts subscriber count in videoCountText and handle in subscriberCountText.
                     subscriber_text = None
                     video_count_text = channel.get('videoCountText', {})
                     if isinstance(video_count_text, dict):
-                        if 'simpleText' in video_count_text:
-                            subscriber_text = video_count_text['simpleText']
-                        elif 'accessibility' in video_count_text:
-                            subscriber_text = video_count_text.get('accessibility', {}).get('accessibilityData', {}).get('label', '')
-                    
-                    # Get channel handle from subscriberCountText or custom URL
+                        subscriber_text = (
+                            video_count_text.get('simpleText')
+                            or video_count_text.get('accessibility', {}).get('accessibilityData', {}).get('label', '')
+                        )
+                    if not subscriber_text:
+                        subscriber_count_text = channel.get('subscriberCountText', {})
+                        if isinstance(subscriber_count_text, dict):
+                            subscriber_text = (
+                                subscriber_count_text.get('simpleText')
+                                or subscriber_count_text.get('accessibility', {}).get('accessibilityData', {}).get('label', '')
+                            )
+
+                    # Get channel handle from canonical URL or nav URL.
                     handle = None
-                    subscriber_count_text = channel.get('subscriberCountText', {})
-                    if isinstance(subscriber_count_text, dict) and 'simpleText' in subscriber_count_text:
-                        handle_text = subscriber_count_text['simpleText']
-                        if handle_text.startswith('@'):
-                            handle = handle_text[1:]  # Remove @ symbol
-                    
-                    if not handle:  # Fallback to custom URL
-                        custom_url = channel.get('navigationEndpoint', {}).get('browseEndpoint', {}).get('canonicalBaseUrl', '')
-                        if custom_url.startswith('@'):
-                            handle = custom_url[1:]  # Remove @ symbol
+                    custom_url = channel.get('navigationEndpoint', {}).get('browseEndpoint', {}).get('canonicalBaseUrl', '')
+                    if isinstance(custom_url, str) and custom_url.startswith('@'):
+                        handle = custom_url[1:]
+                    if not handle:
+                        nav_url = channel.get('navigationEndpoint', {}).get('commandMetadata', {}).get('webCommandMetadata', {}).get('url', '')
+                        if isinstance(nav_url, str) and '/@' in nav_url:
+                            handle = nav_url.split('/@', 1)[1].split('/')[0]
                     
                     # Check for verification badge
                     is_verified = False
@@ -124,9 +134,9 @@ class ChannelStatsScraper(BaseScraper):
                             is_verified = True
                             break
                     
-                    # Extract all channel information
-                    channel_info[handle] = {
-                        'id': handle,  # Use handle as primary ID
+                    # Extract all channel information (canonical key: YouTube channel ID)
+                    channel_info[channel_id] = {
+                        'id': channel_id,
                         'name': channel.get('title', {}).get('simpleText', ''),
                         'url': 'https://youtube.com' + channel.get('navigationEndpoint', {}).get('commandMetadata', {}).get('webCommandMetadata', {}).get('url', ''),
                         'description': channel.get('descriptionSnippet', {}).get('runs', [{}])[0].get('text', ''),
@@ -140,11 +150,14 @@ class ChannelStatsScraper(BaseScraper):
                     # Get the highest resolution thumbnail
                     thumbnails = channel.get('thumbnail', {}).get('thumbnails', [])
                     if thumbnails:
-                        channel_info[handle]['thumbnail_url'] = thumbnails[-1].get('url', '')
-                        if channel_info[handle]['thumbnail_url'].startswith('//'):
-                            channel_info[handle]['thumbnail_url'] = 'https:' + channel_info[handle]['thumbnail_url']
-                    
-                    print(f"Found channel {channel_info[handle]['name']} (@{channel_info[handle]['handle']}): {channel_info[handle]['subscriber_count']:,} subscribers {'✓' if is_verified else ''}")
+                        channel_info[channel_id]['thumbnail_url'] = thumbnails[-1].get('url', '')
+                        if channel_info[channel_id]['thumbnail_url'].startswith('//'):
+                            channel_info[channel_id]['thumbnail_url'] = 'https:' + channel_info[channel_id]['thumbnail_url']
+
+                    sub_count = channel_info[channel_id]['subscriber_count']
+                    sub_display = f"{sub_count:,}" if isinstance(sub_count, int) else "unknown"
+                    handle_display = f"@{channel_info[channel_id]['handle']}" if channel_info[channel_id]['handle'] else channel_id
+                    print(f"Found channel {channel_info[channel_id]['name']} ({handle_display}): {sub_display} subscribers {'✓' if is_verified else ''}")
                     
                 except Exception as e:
                     print(f"Error processing channel: {e}")
@@ -294,39 +307,64 @@ class ChannelStatsScraper(BaseScraper):
         cursor = self.db.db.cursor()
         
         try:
-            # Calculate average views from last 30 videos on channel page
-            average_views = self.get_channel_average_views(info['url'])
+            # Calculate 48h baseline proxy from recent uploads.
+            baseline_48h = self.get_channel_average_views(info['url'])
             
             # First check if channel exists
             cursor.execute('SELECT id FROM channels WHERE id = ?', (channel_id,))
             channel_exists = cursor.fetchone() is not None
             
             if channel_exists:
-                # Update only specific fields for existing channels
+                # Update only specific fields for existing channels.
                 cursor.execute('''
                     UPDATE channels 
-                    SET subscriber_count = ?,
+                    SET name = ?,
+                        url = ?,
+                        youtube_id = ?,
+                        description = ?,
+                        thumbnail_url = ?,
+                        subscriber_count = ?,
                         is_verified = ?,
                         handle = ?,
-                        average_views = ?,
+                        baseline_48h = ?,
+                        baseline_updated_at = CURRENT_TIMESTAMP,
                         last_updated = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', (
+                    info['name'],
+                    info['url'],
+                    info['youtube_id'],
+                    info['description'],
+                    info['thumbnail_url'],
                     info['subscriber_count'],
                     info['is_verified'],
                     info['handle'],
-                    average_views,
+                    baseline_48h,
                     channel_id
                 ))
-                print(f"Updated channel {info['name']} with {info['subscriber_count']:,} subscribers (avg views: {average_views:,})")
+                print(f"Updated channel {info['name']} with {info['subscriber_count']:,} subscribers (48h baseline: {baseline_48h:,})")
             else:
                 # Insert new channel with all fields
                 cursor.execute('''
                     INSERT INTO channels 
-                    (id, name, url, subscriber_count, description, thumbnail_url, is_verified, handle, average_views, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    (
+                        id,
+                        youtube_id,
+                        name,
+                        url,
+                        subscriber_count,
+                        description,
+                        thumbnail_url,
+                        is_verified,
+                        handle,
+                        baseline_48h,
+                        baseline_updated_at,
+                        last_updated
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ''', (
                     channel_id,
+                    info['youtube_id'],
                     info['name'],
                     info['url'],
                     info['subscriber_count'],
@@ -334,9 +372,9 @@ class ChannelStatsScraper(BaseScraper):
                     info['thumbnail_url'],
                     info['is_verified'],
                     info['handle'],
-                    average_views
+                    baseline_48h
                 ))
-                print(f"Inserted new channel {info['name']} with {info['subscriber_count']:,} subscribers (avg views: {average_views:,})")
+                print(f"Inserted new channel {info['name']} with {info['subscriber_count']:,} subscribers (48h baseline: {baseline_48h:,})")
             
             self.db.db.commit()
             

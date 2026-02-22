@@ -1,14 +1,15 @@
 import json
-import os
+import math
 import sqlite3
 import webbrowser
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
 
 from .db_schema import resolve_db_path, resolve_state_dir
 
-def get_db(db_path: Path):
+
+def get_db(db_path: Path) -> sqlite3.Connection:
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -17,47 +18,226 @@ def get_db(db_path: Path):
         print(f"Database connection error: {e}")
         raise
 
-def check_db_initialized(db_path: Path):
+
+def check_db_initialized(db_path: Path) -> tuple[bool, str | None]:
     if not db_path.exists():
         return False, (
             "Database file not found. Run `ytsubs scrape-videos` or `ytsubs scrape-channels` first."
         )
-    
+
     try:
         db = get_db(db_path)
         cursor = db.cursor()
-        
-        cursor.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' 
-            AND name IN ('videos', 'channels')
-        """)
-        
+
+        cursor.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='table'
+            """
+        )
         existing_tables = {row[0] for row in cursor.fetchall()}
-        required_tables = {'videos', 'channels'}
-        
+        required_tables = {"videos", "channels", "scrape_runs", "video_observations"}
+
         if not required_tables.issubset(existing_tables):
             missing_tables = required_tables - existing_tables
             return False, (
-                f"Missing tables: {', '.join(missing_tables)}. "
+                f"Missing tables: {', '.join(sorted(missing_tables))}. "
                 "Run `ytsubs scrape-videos` or `ytsubs scrape-channels` to initialize."
             )
-        
+
         return True, None
-        
+
     except sqlite3.Error as e:
         return False, f"Database error: {str(e)}"
     finally:
-        if 'db' in locals():
+        if "db" in locals():
             db.close()
 
-def get_thumbnail_url(video_id, thumbnail=None):
+
+def get_thumbnail_url(video_id: str, thumbnail: str | None = None) -> str:
     """Get a valid thumbnail URL, falling back to YouTube's default if none provided."""
     if thumbnail and thumbnail.strip():
         return thumbnail
-    return f'https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg'
+    return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
 
-def get_videos():
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _age_curve_fraction_48h(age_hours: float) -> float:
+    if age_hours <= 0:
+        return 0.03
+    if age_hours <= 8:
+        return max(0.03, 0.6 * (age_hours / 8.0))
+    if age_hours < 48:
+        return 0.6 + 0.35 * ((age_hours - 8.0) / 40.0)
+    return 0.95
+
+
+def _age_curve_expected_slope(age_hours: float) -> float:
+    if age_hours <= 0:
+        return 0.075
+    if age_hours <= 8:
+        return 0.075
+    if age_hours < 48:
+        return 0.00875
+    return 0.001
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _norm_ratio(value: float, cap: float = 6.0) -> float:
+    if value <= 0:
+        return 0.0
+    return _clamp(math.log1p(value) / math.log1p(cap), 0.0, 1.0)
+
+
+def _norm_reach(reach: float) -> float:
+    if reach <= 0:
+        return 0.0
+    return _clamp(math.sqrt(reach * 10.0), 0.0, 1.0)
+
+
+def _duration_prior(duration_seconds: int | None) -> float:
+    if duration_seconds is None or duration_seconds <= 0:
+        return 0.5
+    if duration_seconds < 120:
+        return 0.35
+    if duration_seconds < 600:
+        return 0.6
+    if duration_seconds < 1800:
+        return 1.0
+    if duration_seconds < 3600:
+        return 0.7
+    return 0.5
+
+
+def _freshness_relevance(age_hours: float) -> float:
+    if age_hours <= 24:
+        return 1.0
+    if age_hours <= 72:
+        return 0.95
+    if age_hours <= 168:
+        return 0.85
+    if age_hours <= 336:
+        return 0.72
+    if age_hours <= 720:
+        return 0.55
+    return 0.45
+
+
+def _velocity_weight(age_hours: float) -> float:
+    if age_hours <= 24:
+        return 0.25
+    if age_hours <= 72:
+        return 0.20
+    if age_hours <= 168:
+        return 0.12
+    if age_hours <= 336:
+        return 0.06
+    return 0.02
+
+
+def _confidence_multiplier(
+    *,
+    parse_confidence: float,
+    channel_resolution_method: str | None,
+    baseline_updated_at: datetime | None,
+    subscriber_count: int,
+    baseline_48h: float,
+    now: datetime,
+) -> float:
+    confidence = _clamp(parse_confidence, 0.0, 1.0)
+    multiplier = 0.75 + (0.30 * confidence)
+
+    if baseline_updated_at is not None:
+        staleness_days = (now - baseline_updated_at).total_seconds() / 86400.0
+        if staleness_days > 45:
+            multiplier -= 0.05
+
+    if not subscriber_count or baseline_48h <= 0:
+        multiplier -= 0.08
+
+    if channel_resolution_method and channel_resolution_method not in {"direct", "channel_url", "feed_dom"}:
+        multiplier -= 0.03
+
+    return _clamp(multiplier, 0.75, 1.05)
+
+
+def _early_breakout_boost(age_hours: float, relative_nowcast: float, velocity_shock: float) -> float:
+    if age_hours > 6:
+        return 0.0
+    if relative_nowcast < 1.2 or velocity_shock < 1.2:
+        return 0.0
+
+    return _clamp(0.03 * math.log1p(relative_nowcast * velocity_shock), 0.0, 0.12)
+
+
+def _load_rankable_rows(cursor: sqlite3.Cursor) -> list[sqlite3.Row]:
+    cursor.execute(
+        """
+        WITH LatestObservation AS (
+            SELECT
+                video_id,
+                views,
+                age_hours,
+                parse_confidence,
+                observed_at
+            FROM (
+                SELECT
+                    vo.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vo.video_id
+                        ORDER BY vo.observed_at DESC, vo.id DESC
+                    ) AS rn
+                FROM video_observations vo
+            ) ranked
+            WHERE rn = 1
+        )
+        SELECT
+            v.id,
+            v.title,
+            v.url,
+            v.thumbnail,
+            v.duration_text,
+            v.duration_seconds,
+            v.published_date,
+            v.views AS fallback_views,
+            v.parse_confidence AS video_parse_confidence,
+            v.channel_resolution_method,
+            c.name AS channel_name,
+            c.subscriber_count,
+            c.is_verified,
+            c.thumbnail_url AS channel_thumbnail,
+            c.baseline_48h,
+            c.baseline_updated_at,
+            c.last_updated,
+            lo.views AS observed_views,
+            lo.age_hours AS observed_age_hours,
+            lo.parse_confidence AS observation_parse_confidence,
+            lo.observed_at
+        FROM videos v
+        JOIN channels c ON v.channel_id = c.id
+        LEFT JOIN LatestObservation lo ON lo.video_id = v.id
+        """
+    )
+    return cursor.fetchall()
+
+
+def get_videos() -> list[dict[str, object]]:
     try:
         db_path = resolve_db_path()
         is_initialized, error_message = check_db_initialized(db_path)
@@ -67,184 +247,118 @@ def get_videos():
 
         db = get_db(db_path)
         cursor = db.cursor()
-        
-        cursor.execute('''
-            WITH ChannelStats AS (
-                SELECT 
-                    channel_id,
-                    AVG(views * 1.0 / c.subscriber_count) as avg_view_sub_ratio,
-                    -- Calculate median views for better outlier handling
-                    -- Using approximate median calculation
-                    AVG(views) as avg_views,
-                    COUNT(*) as video_count
-                FROM videos v
-                JOIN channels c ON v.channel_id = c.id
-                WHERE c.subscriber_count > 0
-                GROUP BY channel_id
-            ), VideoMetrics AS (
-                SELECT
-                    v.*,
-                    c.name as channel_name,
-                    c.subscriber_count,
-                    c.is_verified,
-                    c.thumbnail_url as channel_thumbnail,
-                    c.average_views as channel_average_views,
-                    cs.avg_view_sub_ratio,
-                    -- Calculate video age in hours
-                    (julianday('now') - julianday(v.published_date)) * 24 as video_age_hours,
-                    -- Views per hour (velocity metric)
-                    CASE 
-                        WHEN (julianday('now') - julianday(v.published_date)) * 24 > 0 
-                        THEN v.views * 1.0 / ((julianday('now') - julianday(v.published_date)) * 24)
-                        ELSE v.views 
-                    END as views_per_hour,
-                    -- Observed fraction of 48h views, assuming ~60% in first 8h and 95% by 48h
-                    CASE
-                        WHEN (julianday('now') - julianday(v.published_date)) * 24 <= 0 THEN 0.05
-                        WHEN (julianday('now') - julianday(v.published_date)) * 24 <= 8 THEN 
-                            MAX(0.05, 0.6 * (((julianday('now') - julianday(v.published_date)) * 24) / 8.0))
-                        WHEN (julianday('now') - julianday(v.published_date)) * 24 < 48 THEN 
-                            0.6 + 0.35 * ((((julianday('now') - julianday(v.published_date)) * 24) - 8.0) / 40.0)
-                        ELSE 0.95
-                    END as observed_fraction_48h,
-                    -- Predicted 48h views based on the above curve
-                    CASE
-                        WHEN (julianday('now') - julianday(v.published_date)) * 24 < 48 THEN
-                            v.views * 0.95 / NULLIF(
-                                CASE
-                                    WHEN (julianday('now') - julianday(v.published_date)) * 24 <= 0 THEN 0.05
-                                    WHEN (julianday('now') - julianday(v.published_date)) * 24 <= 8 THEN 
-                                        MAX(0.05, 0.6 * (((julianday('now') - julianday(v.published_date)) * 24) / 8.0))
-                                    WHEN (julianday('now') - julianday(v.published_date)) * 24 < 48 THEN 
-                                        0.6 + 0.35 * ((((julianday('now') - julianday(v.published_date)) * 24) - 8.0) / 40.0)
-                                END,
-                                0.05
-                            )
-                        ELSE v.views
-                    END as predicted_views_48h
-                FROM videos v
-                JOIN channels c ON v.channel_id = c.id
-                JOIN ChannelStats cs ON v.channel_id = cs.channel_id
-            )
-            SELECT 
-                vm.id,
-                vm.title,
-                vm.url,
-                vm.thumbnail as thumbnail,
-                vm.views as views,
-                vm.published_date,
-                vm.duration,
-                vm.channel_name,
-                vm.subscriber_count,
-                vm.is_verified,
-                vm.channel_thumbnail,
-                vm.channel_average_views,
-                vm.avg_view_sub_ratio,
-                vm.video_age_hours,
-                vm.views_per_hour,
-                vm.observed_fraction_48h,
-                vm.predicted_views_48h,
-                
-                -- PERFORMANCE SCORE focused on standout content with early-velocity forecast
-                CASE 
-                    WHEN vm.subscriber_count > 0 AND vm.channel_average_views > 0 THEN 
-                        (
-                            -- 1. Base performance relative to channel average (35% weight)
-                            (MIN(vm.views * 1.0 / NULLIF(vm.channel_average_views, 0), 5.0) / 5.0) * 0.35 +
-                            
-                            -- 2. Subscriber engagement rate (25% weight)
-                            CASE 
-                                WHEN vm.subscriber_count > 0 THEN
-                                    MIN(SQRT((vm.views * 1.0 / vm.subscriber_count) * 10), 1.0) * 0.25
-                                ELSE 0
-                            END +
-                            
-                            -- 3. Forecasted 48h performance (20% weight)
-                            (MIN(vm.predicted_views_48h * 1.0 / NULLIF(vm.channel_average_views, 0), 5.0) / 5.0) * 0.20 +
-                            
-                            -- 4. Velocity metric (10% weight)
-                            CASE
-                                WHEN vm.video_age_hours > 1 THEN
-                                    MIN(LOG10(1 + (vm.views * 1.0 / NULLIF(vm.video_age_hours, 1))) / 5.0, 1.0) * 0.10
-                                ELSE 0.10
-                            END +
-                            
-                            -- 5. Channel size normalization (7% weight)
-                            CASE
-                                WHEN vm.subscriber_count < 100000 THEN 0.07
-                                WHEN vm.subscriber_count < 1000000 THEN 0.05
-                                WHEN vm.subscriber_count < 10000000 THEN 0.02
-                                ELSE 0
-                            END +
-                            
-                            -- 6. Duration adjustment (3% weight)
-                            CASE
-                                WHEN vm.duration IS NOT NULL AND vm.duration > 0 THEN
-                                    CASE
-                                        WHEN vm.duration < 120 THEN 0.01  -- < 2 minutes
-                                        WHEN vm.duration < 600 THEN 0.02  -- 2-10 minutes
-                                        WHEN vm.duration < 1800 THEN 0.03 -- 10-30 minutes (sweet spot)
-                                        WHEN vm.duration < 3600 THEN 0.02 -- 30-60 minutes
-                                        ELSE 0.015 -- > 60 minutes
-                                    END
-                                ELSE 0.015 -- Default if no duration
-                            END
-                        )
-                        
-                    ELSE 0 
-                END as performance_score,
-                
-                -- Individual score components for debugging
-                CASE WHEN vm.channel_average_views > 0 THEN (vm.views * 1.0 / NULLIF(vm.channel_average_views, 0)) ELSE 0 END as relative_performance,
-                CASE WHEN vm.subscriber_count > 0 THEN (vm.views * 1.0 / vm.subscriber_count) ELSE 0 END as subscriber_reach,
-                CASE WHEN vm.channel_average_views > 0 THEN (vm.predicted_views_48h * 1.0 / NULLIF(vm.channel_average_views, 0)) ELSE 0 END as forecast_relative_performance,
-                CASE WHEN vm.video_age_hours > 1 THEN
-                    vm.views * 1.0 / vm.video_age_hours
-                ELSE vm.views END as velocity
-                
-            FROM VideoMetrics vm
-            ORDER BY performance_score DESC, vm.published_date DESC
-        ''')
-        
-        rows = cursor.fetchall()
-        videos = []
-        
+        rows = _load_rankable_rows(cursor)
+
+        now = datetime.now(UTC)
+        videos: list[dict[str, object]] = []
+
         for row in rows:
-            video = dict(row)
-            if video['published_date']:
-                try:
-                    date = datetime.fromisoformat(video['published_date'].replace('Z', '+00:00'))
-                    video['published_date'] = date.isoformat()
-                except (ValueError, AttributeError) as e:
-                    print(f"Invalid date format for video {video['id']}: {video['published_date']} - {str(e)}")
-                    continue
-            
-            video['thumbnail'] = get_thumbnail_url(video['id'], video['thumbnail'])
-            video['duration'] = video.get('duration')  # Keep duration in the video object
-            
-            subscriber_count = video.pop('subscriber_count')
-            average_views = video.pop('channel_average_views')
-            performance_score = video.pop('performance_score')
-            video['channel'] = {
-                'name': video.pop('channel_name'),
-                'subscriber_count': int(subscriber_count) if subscriber_count is not None else None,
-                'is_verified': bool(video.pop('is_verified')),
-                'thumbnail': video.pop('channel_thumbnail'),
-                'average_views': int(average_views) if average_views is not None else None
+            published_dt = _parse_datetime(row["published_date"])
+            if published_dt is None:
+                print(f"Invalid date format for video {row['id']}: {row['published_date']}")
+                continue
+
+            observed_age = row["observed_age_hours"]
+            if observed_age is not None and observed_age > 0:
+                age_hours = float(observed_age)
+            else:
+                age_hours = max((now - published_dt).total_seconds() / 3600.0, 0.0)
+
+            raw_views = row["observed_views"] if row["observed_views"] is not None else row["fallback_views"]
+            current_views = int(raw_views or 0)
+
+            baseline_48h = float(row["baseline_48h"] or 0)
+            if baseline_48h <= 0:
+                baseline_48h = float(max(current_views, 1))
+
+            expected_fraction = _age_curve_fraction_48h(age_hours)
+            expected_views_now = max(1.0, baseline_48h * expected_fraction)
+            relative_nowcast = current_views / expected_views_now
+
+            expected_slope = _age_curve_expected_slope(age_hours)
+            expected_vph = max(1.0, baseline_48h * expected_slope)
+            views_per_hour = current_views / max(age_hours, 1.0)
+            velocity_shock = views_per_hour / expected_vph
+
+            subscriber_count = int(row["subscriber_count"] or 0)
+            subscriber_reach = current_views / max(subscriber_count, 1)
+
+            predicted_48h = current_views if age_hours >= 48 else current_views * 0.95 / max(expected_fraction, 0.03)
+            forecast_relative_performance = predicted_48h / max(baseline_48h, 1.0)
+
+            duration_seconds = int(row["duration_seconds"]) if row["duration_seconds"] else None
+            duration_prior = _duration_prior(duration_seconds)
+
+            observation_confidence = row["observation_parse_confidence"]
+            video_confidence = row["video_parse_confidence"]
+            if observation_confidence is not None and video_confidence is not None:
+                parse_confidence = min(float(observation_confidence), float(video_confidence))
+            elif observation_confidence is not None:
+                parse_confidence = float(observation_confidence)
+            elif video_confidence is not None:
+                parse_confidence = float(video_confidence)
+            else:
+                parse_confidence = 0.0
+
+            confidence_multiplier = _confidence_multiplier(
+                parse_confidence=parse_confidence,
+                channel_resolution_method=row["channel_resolution_method"],
+                baseline_updated_at=_parse_datetime(row["baseline_updated_at"]),
+                subscriber_count=subscriber_count,
+                baseline_48h=baseline_48h,
+                now=now,
+            )
+            early_breakout_boost = _early_breakout_boost(age_hours, relative_nowcast, velocity_shock)
+            freshness_relevance = _freshness_relevance(age_hours)
+            velocity_weight = _velocity_weight(age_hours)
+
+            base_score = (
+                0.55 * _norm_ratio(relative_nowcast)
+                + velocity_weight * _norm_ratio(velocity_shock)
+                + 0.15 * _norm_reach(subscriber_reach)
+                + 0.05 * duration_prior
+            )
+            performance_score = ((base_score * confidence_multiplier) + early_breakout_boost) * freshness_relevance
+
+            video = {
+                "id": row["id"],
+                "title": row["title"],
+                "url": row["url"],
+                "thumbnail": get_thumbnail_url(row["id"], row["thumbnail"]),
+                "views": current_views,
+                "published_date": published_dt.isoformat(),
+                "duration": row["duration_text"],
+                "channel": {
+                    "name": row["channel_name"],
+                    "subscriber_count": subscriber_count,
+                    "is_verified": bool(row["is_verified"]),
+                    "thumbnail": row["channel_thumbnail"],
+                    "average_views": int(baseline_48h),
+                },
+                "performance_score": float(performance_score),
+                "performance_details": {
+                    "relative_performance": float(relative_nowcast),
+                    "subscriber_reach": float(subscriber_reach),
+                    "forecast_relative_performance": float(forecast_relative_performance),
+                    "velocity": float(views_per_hour),
+                    "views_per_hour": float(views_per_hour),
+                    "video_age_hours": float(age_hours),
+                    "observed_fraction_48h": float(expected_fraction),
+                    "predicted_views_48h": float(predicted_48h),
+                    "velocity_shock": float(velocity_shock),
+                    "confidence_multiplier": float(confidence_multiplier),
+                    "parse_confidence": float(parse_confidence),
+                    "expected_views_now": float(expected_views_now),
+                    "early_breakout_boost": float(early_breakout_boost),
+                    "freshness_relevance": float(freshness_relevance),
+                    "velocity_weight": float(velocity_weight),
+                },
             }
-            video['performance_score'] = float(performance_score) if performance_score is not None else 0
-            video['performance_details'] = {
-                'relative_performance': float(row['relative_performance']) if row['relative_performance'] is not None else 0,
-                'subscriber_reach': float(row['subscriber_reach']) if row['subscriber_reach'] is not None else 0,
-                'forecast_relative_performance': float(row['forecast_relative_performance']) if row['forecast_relative_performance'] is not None else 0,
-                'velocity': float(row['velocity']) if row['velocity'] is not None else 0,
-                'video_age_hours': float(row['video_age_hours']) if row['video_age_hours'] is not None else 0,
-                'views_per_hour': float(row['views_per_hour']) if row['views_per_hour'] is not None else 0,
-                'observed_fraction_48h': float(row['observed_fraction_48h']) if row['observed_fraction_48h'] is not None else 0,
-                'predicted_views_48h': float(row['predicted_views_48h']) if row['predicted_views_48h'] is not None else 0
-            }
+
             videos.append(video)
-        
+
+        videos.sort(key=lambda v: (float(v["performance_score"]), str(v["published_date"])), reverse=True)
+
         db.close()
         return videos
 
@@ -255,32 +369,34 @@ def get_videos():
         print(f"Error: {e}")
         return []
 
-def generate_html(videos, output_path: Path, open_browser: bool = True):
+
+def generate_html(videos: list[dict[str, object]], output_path: Path, open_browser: bool = True) -> None:
     template = (
         resources.files("ytsubs")
         .joinpath("static_template.html")
         .read_text(encoding="utf-8")
     )
-    
+
     # Insert the video data as a JSON array
     video_data_json = json.dumps(videos)
-    html = template.replace('const videoData = VIDEO_DATA_PLACEHOLDER;', f'const videoData = {video_data_json};')
-    
+    html = template.replace("const videoData = VIDEO_DATA_PLACEHOLDER;", f"const videoData = {video_data_json};")
+
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open('w', encoding="utf-8") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         f.write(html)
-    
+
     # Get absolute file URL
     file_url = f"file://{output_path.resolve()}"
-    
+
     print(f"\nGenerated static HTML file at: {output_path}")
     print(f"Found {len(videos)} videos")
     if videos:
         print(f"Date range: {videos[-1]['published_date']} to {videos[0]['published_date']}")
     if open_browser:
-        print(f"\nOpening in default browser...")
+        print("\nOpening in default browser...")
         webbrowser.open(file_url)
+
 
 def feed_path() -> Path:
     return resolve_state_dir() / "ytsubs_feed.html"

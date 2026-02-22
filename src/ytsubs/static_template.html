@@ -563,7 +563,7 @@
                         <div class="performance-popover">
                           <div class="performance-stat">
                             <span class="performance-label"
-                              >Channel Performance:</span
+                              >Nowcast vs Expected:</span
                             >
                             <span
                               >${formatPerformance(
@@ -583,7 +583,7 @@
                           </div>
                           <div class="performance-stat">
                             <span class="performance-label"
-                              >Forecast vs Channel (48h):</span
+                              >Forecast vs Baseline (48h):</span
                             >
                             <span
                               >${formatPerformance(
@@ -593,14 +593,22 @@
                             >
                           </div>
                           <div class="performance-stat">
-                            <span class="performance-label"
-                              >Velocity:</span
-                            >
-                            <span
-                              >${video.performance_details.views_per_hour.toFixed(
+                            <span class="performance-label">Velocity:</span>
+                            <span>
+                              ${video.performance_details.views_per_hour.toFixed(
                                 0
-                              )} views/hr</span
-                            >
+                              )} views/hr (${video.performance_details.velocity_shock.toFixed(
+                                2
+                              )}x)
+                            </span>
+                          </div>
+                          <div class="performance-stat">
+                            <span class="performance-label">Confidence:</span>
+                            <span>
+                              ${formatPerformance(
+                                video.performance_details.confidence_multiplier
+                              )}
+                            </span>
                           </div>
                         </div>
                       </div>

@@ -1,46 +1,37 @@
 # YouTube subscriptions viewer
 
-A local web app that displays your YouTube subscription videos sorted by a sophisticated performance algorithm. The scoring system uses multiple factors to surface high-quality content while giving smaller channels a fair chance to compete.
+A local web app that displays your YouTube subscription videos sorted by a nowcast ranking algorithm tuned for ad hoc runs.
 
 ## Ranking Algorithm
 
-The performance score is calculated using a weighted combination of factors, designed to surface exceptional videos even when the scraper is run sporadically:
+The unified performance score is point-in-time and optimized for sporadic scraping (for example 1-2 runs/day):
 
-1. **Base Performance (35% weight)**
-   - Compares video views to the channel's average (capped at 5×)
-   - Highlights true standouts within each channel's history
+1. **Nowcast vs Expected (55% weight)**
+   - Compares current views to age-adjusted expected views from each channel's `baseline_48h`.
+   - Surfaces videos that are overperforming *right now*, including very new uploads.
 
-2. **Engagement Rate (25% weight)**
-   - Rewards videos reaching 10%+ of subscribers
-   - Square-root scaling to give diminishing returns without punishing lower reach
+2. **Velocity Shock (25% weight)**
+   - Compares current views/hour to expected slope at the video's current age.
+   - Rewards sudden acceleration without requiring 24h of data.
 
-3. **Forecasted 48h Performance (20% weight)**
-   - Projects total views at 48h assuming ~60% arrive in the first 8h and ~95% by 48h
-   - Gives very new uploads credit for strong early velocity
+3. **Subscriber Reach (15% weight)**
+   - Views relative to subscriber count with diminishing returns.
 
-4. **Velocity Metric (10% weight)**
-   - Views per hour since publication, logarithmically scaled as a bonus
-   - Keeps currently surging content competitive without penalizing slower burns
+4. **Duration Prior (5% weight)**
+   - Lightweight bias for durations that tend to produce stable performance.
 
-5. **Channel Size Normalization (7% weight)**
-   - Small channels (<100k subs): +7% bonus
-   - Medium channels (100k-1M): +5% bonus
-   - Large channels (1M-10M): +2% bonus
-   - Helps smaller creators compete fairly
-
-6. **Duration Adjustment (3% weight)**
-   - Slightly boosts videos in the 10–30 minute sweet spot
-   - Keeps short/long content competitive without heavy bias
-
-This scoring system keeps the focus on videos that outperform their channel norms, credits early momentum as a forecast (not just recency), and avoids decaying scores just because content is older when you run the scraper.
+Score modifiers:
+- **Confidence multiplier (0.75-1.05)** lowers rank impact for weak parse confidence/stale baselines.
+- **Early breakout boost (up to +0.12)** helps very new videos that are simultaneously strong in nowcast and velocity.
 
 ## Overview
 
 A tool to track YouTube subscriptions and surface high-performing videos. It consists of:
 
-1. A channel stats scraper that collects subscriber counts and average views
+1. A channel stats scraper that collects subscriber counts and a channel `baseline_48h` proxy
 2. A video scraper that collects new videos from subscribed channels
-3. A static page generator that creates a feed of videos sorted by performance
+3. Observation tracking per scrape run for better point-in-time ranking
+4. A static page generator that creates a feed of videos sorted by performance
 
 ## Quick start (recommended: uvx)
 
@@ -71,6 +62,14 @@ mise install
 uv sync
 ```
 
+### Database reset
+
+If local schema/data gets out of sync, reset your local DB:
+
+```bash
+rm -f ~/.local/state/ytsubs/youtube.db
+```
+
 ## Usage
 
 ### First-time setup
@@ -93,7 +92,7 @@ Your YouTube login is saved in `~/.local/state/ytsubs/chrome_profile` (or `$XDG_
 uv run ytsubs scrape-videos  # Run daily to get new videos
 ```
 
-2. Update channel statistics (subscriber counts, average views):
+2. Update channel statistics (subscriber counts and baseline views):
 
 ```bash
 uv run ytsubs scrape-channels  # Run occasionally (e.g., monthly)

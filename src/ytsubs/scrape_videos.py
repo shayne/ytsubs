@@ -1,6 +1,6 @@
 from .base_scraper import BaseScraper
 from .db_schema import YouTubeDB
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import re
 import json
 from urllib import request
@@ -72,14 +72,14 @@ class VideoScraper(BaseScraper):
         
         # Handle "just now", "moments ago", etc.
         if text in ['just now', 'moments ago']:
-            return datetime.now().isoformat()
+            return datetime.now(UTC).isoformat()
             
         # Handle "X minutes ago"
         if 'minute' in text:
             match = re.search(r'(\d+)\s*minute', text)
             if match:
                 minutes = int(match.group(1))
-                return (datetime.now() - timedelta(minutes=minutes)).isoformat()
+                return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
         
         # Extract number and unit from relative date
         match = re.match(r'^(\d+)\s+(hour|day|week|month|year)s?\s+ago$', text)
@@ -89,7 +89,7 @@ class VideoScraper(BaseScraper):
         number, unit = match.groups()
         number = int(number)
         
-        now = datetime.now()
+        now = datetime.now(UTC)
         
         if unit == 'hour':
             return (now - timedelta(hours=number)).isoformat()
@@ -109,6 +109,28 @@ class VideoScraper(BaseScraper):
         else:
             raise ValueError(f"Unknown time unit in '{date_text}'")
 
+    def parse_duration_seconds(self, duration_text):
+        """Convert duration text like '12:34' or '1:02:10' into seconds."""
+        if not duration_text:
+            return None
+
+        cleaned = duration_text.strip()
+        if not cleaned:
+            return None
+
+        parts = cleaned.split(':')
+        try:
+            if len(parts) == 2:
+                minutes, seconds = (int(part) for part in parts)
+                return (minutes * 60) + seconds
+            if len(parts) == 3:
+                hours, minutes, seconds = (int(part) for part in parts)
+                return (hours * 3600) + (minutes * 60) + seconds
+        except ValueError:
+            return None
+
+        return None
+
     def scrape(self, days=30):
         """Fetch recent videos from subscriptions"""
         print("\nScanning YouTube subscriptions feed...")
@@ -116,20 +138,26 @@ class VideoScraper(BaseScraper):
         self.wait_for_page_load()
         
         # Calculate cutoff date - anything older than 30 days should be trimmed
-        cutoff_date = datetime.now() - timedelta(days=30)
+        cutoff_date = datetime.now(UTC) - timedelta(days=30)
         
         # Clean up old videos - anything that's now too old to show up in feed
         cursor = self.db.db.cursor()
         cursor.execute('DELETE FROM videos WHERE published_date < ?', (cutoff_date.isoformat(),))
         trimmed_count = cursor.rowcount
         self.db.db.commit()
+
+        scrape_run_id = self.db.start_scrape_run("videos")
         
         processed_video_ids = set()
         old_videos_count = 0
         max_old_videos = 3  # Stop after finding this many old videos
         total_new = 0
         total_updated = 0
-        missing_channel_videos = 0
+        missing_channel_video_ids: set[str] = set()
+        missing_channel_reasons = {
+            "untracked_channel": 0,
+            "no_channel_metadata": 0,
+        }
         missing_channel_log = []
         stop_reason = ""
 
@@ -152,7 +180,7 @@ class VideoScraper(BaseScraper):
             stats.add_row(f"[white]Phase:[/] {phase}")
             stats.add_row(f"[cyan]Processed:[/] {len(processed_video_ids)}")
             stats.add_row(f"[green]New:[/] {total_new}   [yellow]Updated:[/] {total_updated}")
-            stats.add_row(f"[red]Missing channels:[/] {missing_channel_videos}")
+            stats.add_row(f"[red]Missing channels:[/] {len(missing_channel_video_ids)}")
             if notes:
                 stats.add_row(f"[bright_magenta]Note:[/] {notes}")
 
@@ -346,7 +374,15 @@ class VideoScraper(BaseScraper):
                                 if video_id in processed_video_ids:
                                     continue
 
-                                if not video_info['channel_id']:
+                                parse_confidence = 1.0
+                                resolution_method = "feed_dom"
+                                resolved_channel_id, db_resolution = self.db.resolve_channel_id(
+                                    video_info.get('channel_id'),
+                                    video_info.get('channel_url'),
+                                    video_info.get('channel_name'),
+                                )
+
+                                if not resolved_channel_id:
                                     resolved_id, resolved_url, resolved_name = self.resolve_channel_using_oembed(video_id)
                                     if resolved_id:
                                         video_info['channel_id'] = resolved_id
@@ -354,19 +390,43 @@ class VideoScraper(BaseScraper):
                                         video_info['channel_url'] = resolved_url
                                     if resolved_name and not video_info.get('channel_name'):
                                         video_info['channel_name'] = resolved_name
-                                
-                                if not video_info['channel_id']:
-                                    missing_channel_videos += 1
-                                    missing_channel_log.append(f"{video_info['title']} ({video_id}) - missing channel")
+                                    if resolved_id or resolved_url or resolved_name:
+                                        parse_confidence = min(parse_confidence, 0.85)
+                                        resolution_method = "oembed"
+                                        resolved_channel_id, db_resolution = self.db.resolve_channel_id(
+                                            video_info.get('channel_id'),
+                                            video_info.get('channel_url'),
+                                            video_info.get('channel_name'),
+                                        )
+
+                                if not resolved_channel_id:
+                                    processed_video_ids.add(video_id)
+                                    if video_id not in missing_channel_video_ids:
+                                        missing_channel_video_ids.add(video_id)
+                                        has_channel_metadata = bool(
+                                            video_info.get('channel_id')
+                                            or video_info.get('channel_url')
+                                            or video_info.get('channel_name')
+                                        )
+                                        reason = "untracked_channel" if has_channel_metadata else "no_channel_metadata"
+                                        missing_channel_reasons[reason] += 1
+                                        reason_label = "untracked channel" if has_channel_metadata else "missing channel metadata"
+                                        channel_hint = (
+                                            video_info.get('channel_name')
+                                            or video_info.get('channel_id')
+                                            or video_info.get('channel_url')
+                                            or "unknown"
+                                        )
+                                        missing_channel_log.append(
+                                            f"{video_info['title']} ({video_id}) - {reason_label}: {channel_hint}"
+                                        )
                                     continue
 
                                 cursor = self.db.db.cursor()
-                                cursor.execute('SELECT 1 FROM channels WHERE id = ?', (video_info['channel_id'],))
-                                if not cursor.fetchone():
-                                    missing_channel_videos += 1
-                                    missing_channel_log.append(f"{video_info['title']} ({video_id}) - channel {video_info['channel_id']} not tracked")
-                                    continue
-                                
+                                resolution_method = db_resolution if resolution_method == "feed_dom" else f"{resolution_method}+{db_resolution}"
+                                if db_resolution in {"handle_url", "direct"}:
+                                    parse_confidence = min(parse_confidence, 0.95)
+
                                 processed_video_ids.add(video_id)
                                 
                                 if video_info['publish_date']:
@@ -380,43 +440,39 @@ class VideoScraper(BaseScraper):
                                             continue
                                     except ValueError:
                                         continue
-                                
+
                                 cursor.execute('SELECT id FROM videos WHERE id = ?', (video_id,))
                                 existing_video = cursor.fetchone()
-                                
+
+                                duration_text = video_info.get('duration')
+                                duration_seconds = self.parse_duration_seconds(duration_text)
+                                self.db.upsert_video(
+                                    video_id=video_id,
+                                    channel_id=resolved_channel_id,
+                                    title=video_info['title'],
+                                    url=video_info['url'],
+                                    thumbnail=video_info['thumbnail'],
+                                    views=video_info['views'],
+                                    published_date=video_info['publish_date'],
+                                    duration_text=duration_text,
+                                    duration_seconds=duration_seconds,
+                                    parse_confidence=parse_confidence,
+                                    channel_resolution_method=resolution_method,
+                                )
+
+                                age_hours = max((datetime.now(UTC) - publish_date).total_seconds() / 3600.0, 0.0)
+                                self.db.record_video_observation(
+                                    video_id=video_id,
+                                    scrape_run_id=scrape_run_id,
+                                    views=video_info['views'],
+                                    age_hours=age_hours,
+                                    parse_confidence=parse_confidence,
+                                )
+
                                 if existing_video:
-                                    cursor.execute('''
-                                        UPDATE videos 
-                                        SET title = ?, url = ?, thumbnail = ?, views = ?, published_date = ?, duration = ?
-                                        WHERE id = ?
-                                    ''', (
-                                        video_info['title'],
-                                        video_info['url'],
-                                        video_info['thumbnail'],
-                                        video_info['views'],
-                                        video_info['publish_date'],
-                                        video_info.get('duration'),
-                                        video_id
-                                    ))
-                                    self.db.db.commit()
                                     updated_in_this_scroll += 1
                                     total_updated += 1
                                 else:
-                                    cursor.execute('''
-                                        INSERT INTO videos 
-                                        (id, channel_id, title, url, thumbnail, views, published_date, duration)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                    ''', (
-                                        video_id,
-                                        video_info['channel_id'],
-                                        video_info['title'],
-                                        video_info['url'],
-                                        video_info['thumbnail'],
-                                        video_info['views'],
-                                        video_info['publish_date'],
-                                        video_info.get('duration')
-                                    ))
-                                    self.db.db.commit()
                                     new_in_this_scroll += 1
                                     total_new += 1
                                 
@@ -464,10 +520,20 @@ class VideoScraper(BaseScraper):
 
                 live.update(render_status(i + 1, "Processing latest videos"))
 
+        self.db.finish_scrape_run(scrape_run_id)
+
         reason_text = stop_reason or "Completed planned scrolls"
         self.console.print(f"\n[bold green]󰗣  Scan complete ({reason_text}).[/] {total_new} new videos added, {total_updated} videos updated, {trimmed_count} videos trimmed.")
-        if missing_channel_videos:
-            self.console.print(f"[bold yellow]⚠️  Skipped {missing_channel_videos} videos whose channels are not in the database.[/]")
+        skipped_missing_channels = len(missing_channel_video_ids)
+        if skipped_missing_channels:
+            self.console.print(
+                f"[bold yellow]⚠️  Skipped {skipped_missing_channels} unique videos whose channels are not in the database.[/]"
+            )
+            self.console.print(
+                "[yellow]Reasons:[/] "
+                f"{missing_channel_reasons['untracked_channel']} untracked channel, "
+                f"{missing_channel_reasons['no_channel_metadata']} missing channel metadata"
+            )
             if missing_channel_log:
                 self.console.print("Examples:")
                 for entry in missing_channel_log[:5]:
