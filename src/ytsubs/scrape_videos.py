@@ -257,10 +257,18 @@ class VideoScraper(BaseScraper):
                                         element.querySelector('yt-image img');
 
                         // Duration - updated selector for new YouTube structure
-                        const durationEl = element.querySelector('badge-shape.yt-badge-shape div.yt-badge-shape__text') ||
-                                         element.querySelector('div.yt-badge-shape__text') ||
-                                         element.querySelector('yt-thumbnail-overlay-time-status-view-model span') ||
-                                         element.querySelector('ytd-thumbnail-overlay-time-status-renderer span');
+                        const durationCandidates = [
+                            element.querySelector('yt-thumbnail-bottom-overlay-view-model .ytBadgeShapeText'),
+                            element.querySelector('yt-thumbnail-badge-view-model .ytBadgeShapeText'),
+                            element.querySelector('badge-shape .ytBadgeShapeText'),
+                            element.querySelector('badge-shape.yt-badge-shape div.yt-badge-shape__text'),
+                            element.querySelector('div.yt-badge-shape__text'),
+                            element.querySelector('yt-thumbnail-overlay-time-status-view-model span'),
+                            element.querySelector('ytd-thumbnail-overlay-time-status-renderer span')
+                        ].filter(Boolean);
+                        const durationText = durationCandidates
+                            .map(el => el.textContent.trim())
+                            .find(text => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(text)) || null;
 
                         // Ensure URLs are absolute
                         const absolutize = (href) => {
@@ -311,7 +319,7 @@ class VideoScraper(BaseScraper):
                             views: views,
                             publishDate: publishDate,
                             thumbnailUrl: thumbnail ? thumbnail.src : null,
-                            duration: durationEl ? durationEl.textContent.trim() : null
+                            duration: durationText
                         };
                     });
                 }""")

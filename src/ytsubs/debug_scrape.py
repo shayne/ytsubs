@@ -83,6 +83,7 @@ class DebugVideoScraper(BaseScraper):
             f"channelLinks={[c.get('text') for c in video.get('channelLinks', [])]}",
             f"publishRaw={video.get('publishText')}",
             f"viewsRaw={video.get('viewsText')}",
+            f"duration={video.get('duration')}",
         ]
         return " | ".join(parts)
 
@@ -138,10 +139,18 @@ class DebugVideoScraper(BaseScraper):
 
             const dataBits = collectFromData(el);
 
-            const durationEl = el.querySelector('badge-shape.yt-badge-shape div.yt-badge-shape__text') ||
-                               el.querySelector('div.yt-badge-shape__text') ||
-                               el.querySelector('yt-thumbnail-overlay-time-status-view-model span') ||
-                               el.querySelector('ytd-thumbnail-overlay-time-status-renderer span');
+            const durationCandidates = [
+              el.querySelector('yt-thumbnail-bottom-overlay-view-model .ytBadgeShapeText'),
+              el.querySelector('yt-thumbnail-badge-view-model .ytBadgeShapeText'),
+              el.querySelector('badge-shape .ytBadgeShapeText'),
+              el.querySelector('badge-shape.yt-badge-shape div.yt-badge-shape__text'),
+              el.querySelector('div.yt-badge-shape__text'),
+              el.querySelector('yt-thumbnail-overlay-time-status-view-model span'),
+              el.querySelector('ytd-thumbnail-overlay-time-status-renderer span')
+            ].filter(Boolean);
+            const durationText = durationCandidates
+              .map(el => el.textContent.trim())
+              .find(text => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(text)) || null;
 
             const thumbnail = el.querySelector('img.yt-core-image--loaded') || el.querySelector('yt-image img');
             const videoUrl = titleEl ? (titleEl.href && titleEl.href.startsWith('http') ? titleEl.href : null) : null;
@@ -157,7 +166,7 @@ class DebugVideoScraper(BaseScraper):
               channelId: dataBits.channelId || (channelUrl ? (channelUrl.match(/@([\w-]+)/)?.[1] || channelUrl.match(/channel\/([\w-]+)/)?.[1]) : null),
               viewsText: viewsText,
               publishText: publishText,
-              duration: durationEl ? durationEl.textContent.trim() : null,
+              duration: durationText,
               thumbnail: thumbnail ? thumbnail.src : null,
               dataChannelId: dataBits.channelId,
               dataChannelName: dataBits.channelNameFromData,
