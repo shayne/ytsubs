@@ -306,8 +306,11 @@ class YouTubeDB:
                 views = excluded.views,
                 published_date = excluded.published_date,
                 thumbnail = excluded.thumbnail,
-                duration_text = excluded.duration_text,
-                duration_seconds = excluded.duration_seconds,
+                duration_text = COALESCE(NULLIF(excluded.duration_text, ''), videos.duration_text),
+                duration_seconds = CASE
+                    WHEN NULLIF(excluded.duration_text, '') IS NULL THEN videos.duration_seconds
+                    ELSE excluded.duration_seconds
+                END,
                 last_seen_at = CURRENT_TIMESTAMP,
                 parse_confidence = excluded.parse_confidence,
                 channel_resolution_method = excluded.channel_resolution_method
