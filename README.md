@@ -2,6 +2,9 @@
 
 A local web app that displays your YouTube subscription videos sorted by a nowcast ranking algorithm tuned for ad hoc runs.
 
+The collector uses the YouTube Data API when `YOUTUBE_API_KEY` is set. Without that
+environment variable it falls back to the legacy Playwright scraper.
+
 ## Ranking Algorithm
 
 Videos are ranked by a **core score** designed for ad hoc runs and then filtered by the selected facet window (2 days, 1 week, 2 weeks, 1 month). This means each facet shows the strongest videos **within that window**, not a globally recency-biased list.
@@ -32,8 +35,8 @@ Notes:
 
 A tool to track YouTube subscriptions and surface high-performing videos. It consists of:
 
-1. A channel stats scraper that collects subscriber counts and a channel `baseline_48h` proxy
-2. A video scraper that collects new videos from subscribed channels
+1. A channel stats importer that collects subscriber counts and a channel `baseline_48h` proxy
+2. A video importer that collects new videos from subscribed channels
 3. Observation tracking per scrape run for better point-in-time ranking
 4. A static page generator that creates a feed of videos sorted by performance
 
@@ -52,7 +55,8 @@ uvx ytsubs@latest open
 1. Requirements:
 
    - Python 3.12+
-   - Google Chrome browser
+   - YouTube Data API key (`YOUTUBE_API_KEY`)
+   - Google Chrome browser, only if using the no-key legacy scraper fallback
 
 2. (Optional) Install tool versions with mise:
 
@@ -81,12 +85,21 @@ rm -f ~/.local/state/ytsubs/youtube.db
 Run these commands in order:
 
 ```bash
-uv run ytsubs scrape-channels   # When Chrome opens, log in to YouTube
+export YOUTUBE_API_KEY="..."
+# Optional: public channel whose public subscriptions should seed the channels table.
+export YOUTUBE_SUBSCRIPTIONS_CHANNEL_ID="UC..."
+uv run ytsubs scrape-channels   # Seed or refresh channel statistics
 uv run ytsubs scrape-videos     # Collect recent videos and generate the feed
 uv run ytsubs open              # Open the feed in your browser
 ```
 
-Your YouTube login is saved in `~/.local/state/ytsubs/chrome_profile` (or `$XDG_STATE_HOME/ytsubs/chrome_profile`), so you'll only need to log in once. Subsequent runs will reuse this profile.
+With `YOUTUBE_API_KEY` set, these commands use the YouTube Data API and do not open
+Chrome. API-key auth can refresh known channels and can seed channels from a public
+subscriptions list via `YOUTUBE_SUBSCRIPTIONS_CHANNEL_ID`; it cannot read a private
+account's "my subscriptions" feed without OAuth.
+
+If `YOUTUBE_API_KEY` is not set, the legacy scraper opens Chrome. Your YouTube login
+is saved in `~/.local/state/ytsubs/chrome_profile` (or `$XDG_STATE_HOME/ytsubs/chrome_profile`), so you'll only need to log in once. Subsequent runs will reuse this profile.
 
 ### Regular usage
 
@@ -127,7 +140,8 @@ uv run ytsubs debug-scrape --scrolls 4 --filter "gymkhana"
 The project uses:
 
 - SQLite for data storage
-- Playwright for web scraping
+- YouTube Data API for collection when `YOUTUBE_API_KEY` is configured
+- Playwright as the legacy no-key scraping fallback
 - Preact for the frontend (served statically)
 
 ## Makefile commands

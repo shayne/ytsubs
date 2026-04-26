@@ -126,6 +126,66 @@ class YouTubeDB:
         )
         self.db.commit()
 
+    def upsert_channel(
+        self,
+        *,
+        channel_id: str,
+        youtube_id: str,
+        name: str,
+        url: str,
+        handle: str | None,
+        subscriber_count: int,
+        description: str,
+        thumbnail_url: str | None,
+        is_verified: bool,
+        baseline_48h: int,
+    ) -> None:
+        cursor = self.db.cursor()
+        cursor.execute(
+            """
+            INSERT INTO channels (
+                id,
+                youtube_id,
+                name,
+                url,
+                handle,
+                description,
+                thumbnail_url,
+                subscriber_count,
+                is_verified,
+                baseline_48h,
+                baseline_updated_at,
+                last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                youtube_id = excluded.youtube_id,
+                name = excluded.name,
+                url = excluded.url,
+                handle = excluded.handle,
+                description = excluded.description,
+                thumbnail_url = excluded.thumbnail_url,
+                subscriber_count = excluded.subscriber_count,
+                is_verified = excluded.is_verified,
+                baseline_48h = excluded.baseline_48h,
+                baseline_updated_at = CURRENT_TIMESTAMP,
+                last_updated = CURRENT_TIMESTAMP
+            """,
+            (
+                channel_id,
+                youtube_id,
+                name,
+                url,
+                handle,
+                description,
+                thumbnail_url,
+                subscriber_count,
+                int(is_verified),
+                baseline_48h,
+            ),
+        )
+        self.db.commit()
+
     def start_scrape_run(self, mode: str) -> int:
         cursor = self.db.cursor()
         cursor.execute(

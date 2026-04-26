@@ -1,8 +1,10 @@
 from .base_scraper import BaseScraper
 from .db_schema import YouTubeDB
+from .youtube_api import YouTubeAPIClient, get_youtube_api_key
 from datetime import UTC, datetime, timedelta
 import re
 import json
+from typing import Any
 from urllib import request
 
 from rich.console import Console, Group
@@ -594,7 +596,127 @@ class VideoScraper(BaseScraper):
             print(f"Error extracting video info: {str(e)}")
             return []
 
+class VideoAPIImporter:
+    def __init__(self, db: YouTubeDB, client: Any):
+        self.db = db
+        self.client = client
+
+    def import_recent_videos(self, days: int = 30) -> dict[str, int]:
+        print("\nFetching recent videos via YouTube API...")
+        cutoff_date = datetime.now(UTC) - timedelta(days=days)
+
+        cursor = self.db.db.cursor()
+        cursor.execute("DELETE FROM videos WHERE published_date < ?", (cutoff_date.isoformat(),))
+        trimmed_count = cursor.rowcount
+        self.db.db.commit()
+
+        tracked_channels = self.db.get_tracked_channels()
+        if not tracked_channels:
+            print("No tracked channels found. Run `uv run ytsubs scrape-channels` first.")
+            return {"processed": 0, "new": 0, "updated": 0, "trimmed": trimmed_count}
+
+        scrape_run_id = self.db.start_scrape_run("videos_api")
+        processed = 0
+        total_new = 0
+        total_updated = 0
+        try:
+            published_after = cutoff_date.isoformat().replace("+00:00", "Z")
+            for channel in tracked_channels:
+                channel_id = str(channel["id"])
+                video_ids = self.client.list_recent_channel_video_ids(channel_id, published_after)
+                if not video_ids:
+                    continue
+
+                for video in self.client.list_videos(video_ids):
+                    video_id = video["id"]
+                    api_channel_id = video.get("channel_id")
+                    resolved_channel_id, resolution_method = self.db.resolve_channel_id(
+                        api_channel_id,
+                        f"https://www.youtube.com/channel/{api_channel_id}" if api_channel_id else None,
+                        None,
+                    )
+                    if not resolved_channel_id:
+                        continue
+
+                    cursor.execute("SELECT id FROM videos WHERE id = ?", (video_id,))
+                    existing_video = cursor.fetchone()
+
+                    self.db.upsert_video(
+                        video_id=video_id,
+                        channel_id=resolved_channel_id,
+                        title=video["title"],
+                        url=video["url"],
+                        thumbnail=video.get("thumbnail"),
+                        views=int(video.get("views", 0)),
+                        published_date=video.get("published_date"),
+                        duration_text=video.get("duration_text"),
+                        duration_seconds=video.get("duration_seconds"),
+                        parse_confidence=1.0,
+                        channel_resolution_method="youtube_api"
+                        if resolution_method != "unresolved"
+                        else "youtube_api_unresolved",
+                    )
+
+                    age_hours = None
+                    published_date = video.get("published_date")
+                    if published_date:
+                        try:
+                            age_hours = max(
+                                (datetime.now(UTC) - datetime.fromisoformat(published_date)).total_seconds() / 3600.0,
+                                0.0,
+                            )
+                        except ValueError:
+                            age_hours = None
+
+                    self.db.record_video_observation(
+                        video_id=video_id,
+                        scrape_run_id=scrape_run_id,
+                        views=int(video.get("views", 0)),
+                        age_hours=age_hours,
+                        parse_confidence=1.0,
+                    )
+                    processed += 1
+                    if existing_video:
+                        total_updated += 1
+                    else:
+                        total_new += 1
+        finally:
+            self.db.finish_scrape_run(scrape_run_id)
+
+        print(
+            f"\nAPI scan complete. {total_new} new videos added, "
+            f"{total_updated} videos updated, {trimmed_count} videos trimmed."
+        )
+        return {
+            "processed": processed,
+            "new": total_new,
+            "updated": total_updated,
+            "trimmed": trimmed_count,
+        }
+
+
 def run(debug: bool = False, generate_feed_after: bool = True) -> None:
+    api_key = get_youtube_api_key()
+    if api_key:
+        db = YouTubeDB()
+        importer = VideoAPIImporter(db=db, client=YouTubeAPIClient(api_key))
+        importer.import_recent_videos()
+
+        if not generate_feed_after:
+            return
+
+        cursor = db.db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM channels WHERE subscriber_count > 0")
+        channel_count = cursor.fetchone()[0]
+        if channel_count > 0:
+            print("\nChannel data found - generating feed...")
+            from . import generate_feed
+
+            generate_feed.run()
+        else:
+            print("\nNo channel data found. Run `ytsubs scrape-channels` to collect channel data.")
+        return
+
     scraper = VideoScraper(debug=debug)
     scraper.run()  # Use run() instead of scrape() to ensure proper setup
 
