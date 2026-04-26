@@ -1,13 +1,8 @@
 import json
-import os
 import re
-from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from .base_scraper import BaseScraper
 from .db_schema import YouTubeDB
-from .youtube_api import YouTubeAPIClient, get_youtube_api_key
 
 class ChannelStatsScraper(BaseScraper):
     def __init__(self, debug=False):
@@ -418,77 +413,5 @@ class ChannelStatsScraper(BaseScraper):
         print(f"\nFinished updating {updated_count} channel statistics!")
 
 def run(debug: bool = False) -> None:
-    api_key = get_youtube_api_key()
-    if api_key:
-        db = YouTubeDB()
-        updater = ChannelStatsAPIUpdater(db=db, client=YouTubeAPIClient(api_key))
-        source_channel_id = (
-            os.environ.get("YOUTUBE_SUBSCRIPTIONS_CHANNEL_ID")
-            or os.environ.get("YTSUBS_YOUTUBE_SUBSCRIPTIONS_CHANNEL_ID")
-        )
-        updater.refresh_channels(subscription_source_channel_id=source_channel_id)
-        return
-
     scraper = ChannelStatsScraper(debug=debug)
     scraper.run()
-
-
-class ChannelStatsAPIUpdater:
-    def __init__(self, db: YouTubeDB, client: Any):
-        self.db = db
-        self.client = client
-
-    def _channel_ids_to_refresh(self, subscription_source_channel_id: str | None) -> list[str]:
-        if subscription_source_channel_id:
-            return list(self.client.iter_subscription_channel_ids(subscription_source_channel_id))
-
-        return [str(row["id"]) for row in self.db.get_tracked_channels()]
-
-    @staticmethod
-    def _trimmed_average(views: Iterable[int]) -> int:
-        values = sorted(view for view in views if view > 0)
-        if not values:
-            return 0
-        if len(values) >= 5:
-            trim_count = max(1, len(values) // 10)
-            trimmed = values[trim_count:-trim_count]
-            if trimmed:
-                values = trimmed
-        return int(sum(values) / len(values))
-
-    def _calculate_baseline_48h(self, channel_id: str) -> int:
-        published_after = (datetime.now(UTC) - timedelta(days=120)).isoformat().replace("+00:00", "Z")
-        video_ids = self.client.list_recent_channel_video_ids(channel_id, published_after)[:30]
-        videos = self.client.list_videos(video_ids)
-        return self._trimmed_average(int(video.get("views", 0)) for video in videos)
-
-    def refresh_channels(self, subscription_source_channel_id: str | None = None) -> int:
-        channel_ids = self._channel_ids_to_refresh(subscription_source_channel_id)
-        if not channel_ids:
-            print(
-                "No channels to refresh. Set YOUTUBE_SUBSCRIPTIONS_CHANNEL_ID for a public "
-                "subscriptions source, or seed the channels table before running the API importer."
-            )
-            return 0
-
-        updated_count = 0
-        for channel in self.client.list_channels(channel_ids):
-            channel_id = channel["id"]
-            baseline_48h = self._calculate_baseline_48h(channel_id)
-            self.db.upsert_channel(
-                channel_id=channel_id,
-                youtube_id=channel_id,
-                name=channel["title"],
-                url=channel["url"],
-                handle=channel.get("handle"),
-                subscriber_count=int(channel.get("subscriber_count", 0)),
-                description=channel.get("description", ""),
-                thumbnail_url=channel.get("thumbnail_url"),
-                is_verified=bool(channel.get("is_verified", False)),
-                baseline_48h=baseline_48h,
-            )
-            updated_count += 1
-            print(f"Updated channel {channel['title']} via YouTube API (48h baseline: {baseline_48h:,})")
-
-        print(f"\nFinished updating {updated_count} channel statistics via YouTube API.")
-        return updated_count
