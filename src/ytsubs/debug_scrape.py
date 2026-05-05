@@ -152,14 +152,22 @@ class DebugVideoScraper(BaseScraper):
               .map(el => el.textContent.trim())
               .find(text => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(text)) || null;
 
-            const thumbnail = el.querySelector('img.yt-core-image--loaded') || el.querySelector('yt-image img');
             const videoUrl = titleEl ? (titleEl.href && titleEl.href.startsWith('http') ? titleEl.href : null) : null;
+            const videoId = (videoUrl && new URL(videoUrl).searchParams.get('v')) || dataBits.videoIdFromData || null;
+            const thumbnail = el.querySelector('yt-thumbnail-view-model img.ytCoreImageHost[src]') ||
+                              el.querySelector('a.ytLockupViewModelContentImage img[src]') ||
+                              el.querySelector('a#thumbnail img[src]') ||
+                              el.querySelector('img.ytCoreImageLoaded[src]') ||
+                              el.querySelector('img.yt-core-image--loaded') ||
+                              el.querySelector('yt-image img');
+            const thumbnailUrl = thumbnail ? (thumbnail.currentSrc || thumbnail.src || thumbnail.getAttribute('src')) : null;
+            const fallbackThumbnailUrl = videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : null;
             const channelUrl = channelAnchors.length ? channelAnchors[0].href : null;
 
             return {
               title: titleEl?.textContent?.trim() || null,
               url: videoUrl,
-              videoId: (videoUrl && new URL(videoUrl).searchParams.get('v')) || dataBits.videoIdFromData || null,
+              videoId: videoId,
               channelName: channelAnchors[0]?.textContent?.trim() || dataBits.channelNameFromData || null,
               channelLinks: channelAnchors,
               channelUrl: channelUrl,
@@ -167,7 +175,7 @@ class DebugVideoScraper(BaseScraper):
               viewsText: viewsText,
               publishText: publishText,
               duration: durationText,
-              thumbnail: thumbnail ? thumbnail.src : null,
+              thumbnail: thumbnailUrl || fallbackThumbnailUrl,
               dataChannelId: dataBits.channelId,
               dataChannelName: dataBits.channelNameFromData,
               dataChannelUrl: dataBits.channelUrlFromData,

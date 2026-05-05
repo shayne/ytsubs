@@ -305,7 +305,7 @@ class YouTubeDB:
                 channel_id = excluded.channel_id,
                 views = excluded.views,
                 published_date = excluded.published_date,
-                thumbnail = excluded.thumbnail,
+                thumbnail = COALESCE(NULLIF(excluded.thumbnail, ''), videos.thumbnail),
                 duration_text = COALESCE(NULLIF(excluded.duration_text, ''), videos.duration_text),
                 duration_seconds = CASE
                     WHEN NULLIF(excluded.duration_text, '') IS NULL THEN videos.duration_seconds

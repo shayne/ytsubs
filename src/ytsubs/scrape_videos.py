@@ -252,10 +252,6 @@ class VideoScraper(BaseScraper):
                         const metadataSpans = element.querySelectorAll('yt-lockup-metadata-view-model span');
                         const channelTextFromMetadata = element.querySelector('yt-content-metadata-view-model span')?.textContent?.trim() || null;
 
-                        // Thumbnail
-                        const thumbnail = element.querySelector('img.yt-core-image--loaded') ||
-                                        element.querySelector('yt-image img');
-
                         // Duration - updated selector for new YouTube structure
                         const durationCandidates = [
                             element.querySelector('yt-thumbnail-bottom-overlay-view-model .ytBadgeShapeText'),
@@ -278,6 +274,17 @@ class VideoScraper(BaseScraper):
                         };
                         const videoUrl = titleEl ? absolutize(titleEl.getAttribute('href') || titleEl.href) : null;
                         const channelUrl = finalChannelEl ? absolutize(finalChannelEl.getAttribute('href') || finalChannelEl.href) : null;
+                        const videoIdFromUrl = videoUrl ? new URL(videoUrl).searchParams.get('v') : null;
+
+                        // Thumbnail - prefer the video thumbnail image, then fall back to YouTube's stable hqdefault URL.
+                        const thumbnail = element.querySelector('yt-thumbnail-view-model img.ytCoreImageHost[src]') ||
+                                        element.querySelector('a.ytLockupViewModelContentImage img[src]') ||
+                                        element.querySelector('a#thumbnail img[src]') ||
+                                        element.querySelector('img.ytCoreImageLoaded[src]') ||
+                                        element.querySelector('img.yt-core-image--loaded') ||
+                                        element.querySelector('yt-image img');
+                        const thumbnailUrl = thumbnail ? (thumbnail.currentSrc || thumbnail.src || thumbnail.getAttribute('src')) : null;
+                        const fallbackThumbnailUrl = videoIdFromUrl ? `https://i.ytimg.com/vi/${videoIdFromUrl}/hqdefault.jpg` : null;
 
                         // Parse metadata for views and publish date
                         let publishDate = null;
@@ -318,7 +325,7 @@ class VideoScraper(BaseScraper):
                             channelText: channelTextFromMetadata,
                             views: views,
                             publishDate: publishDate,
-                            thumbnailUrl: thumbnail ? thumbnail.src : null,
+                            thumbnailUrl: thumbnailUrl || fallbackThumbnailUrl,
                             duration: durationText
                         };
                     });

@@ -58,7 +58,7 @@ def get_thumbnail_url(video_id: str, thumbnail: str | None = None) -> str:
     """Get a valid thumbnail URL, falling back to YouTube's default if none provided."""
     if thumbnail and thumbnail.strip():
         return thumbnail
-    return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

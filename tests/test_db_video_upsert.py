@@ -53,13 +53,18 @@ class VideoUpsertTests(unittest.TestCase):
         )
         self.db.db.commit()
 
-    def _upsert_video(self, duration_text: str | None, duration_seconds: int | None) -> None:
+    def _upsert_video(
+        self,
+        duration_text: str | None,
+        duration_seconds: int | None,
+        thumbnail: str | None = "https://i.ytimg.com/vi/video123/maxresdefault.jpg",
+    ) -> None:
         self.db.upsert_video(
             video_id="video123",
             channel_id="UC123",
             title="Example Video",
             url="https://www.youtube.com/watch?v=video123",
-            thumbnail="https://i.ytimg.com/vi/video123/maxresdefault.jpg",
+            thumbnail=thumbnail,
             views=1234,
             published_date="2026-04-22T12:00:00+00:00",
             duration_text=duration_text,
@@ -80,6 +85,19 @@ class VideoUpsertTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row["duration_text"], "12:34")
         self.assertEqual(row["duration_seconds"], 754)
+
+    def test_null_thumbnail_update_preserves_existing_thumbnail(self) -> None:
+        original_thumbnail = "https://i.ytimg.com/vi/video123/maxresdefault.jpg"
+        self._upsert_video("12:34", 754, thumbnail=original_thumbnail)
+
+        self._upsert_video("12:34", 754, thumbnail=None)
+
+        row = self.db.db.execute(
+            "SELECT thumbnail FROM videos WHERE id = ?",
+            ("video123",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["thumbnail"], original_thumbnail)
 
 
 if __name__ == "__main__":

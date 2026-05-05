@@ -167,6 +167,12 @@ class GenerateFeedNowcastTests(unittest.TestCase):
         self.assertEqual(videos[0]["id"], "rolling")
         self.assertEqual(videos[0]["views"], 9_500)
 
+    def test_missing_thumbnail_uses_hqdefault_fallback(self) -> None:
+        self.assertEqual(
+            generate_feed.get_thumbnail_url("8rEUQlTOcAg", None),
+            "https://i.ytimg.com/vi/8rEUQlTOcAg/hqdefault.jpg",
+        )
+
     def test_low_parse_confidence_gets_penalized(self) -> None:
         self._insert_channel("UCHIGH", subscribers=90_000, baseline_48h=30_000)
         self._insert_channel("UCLOW", subscribers=90_000, baseline_48h=30_000)
