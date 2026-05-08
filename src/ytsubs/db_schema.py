@@ -251,6 +251,19 @@ class YouTubeDB:
 
         return None, "unresolved"
 
+    def resolve_channel_candidates(self, channel_candidates: list[dict[str, str | None]]) -> tuple[str | None, str]:
+        """Resolve the first tracked channel from a list of associated channel candidates."""
+        for index, candidate in enumerate(channel_candidates, start=1):
+            channel_id, method = self.resolve_channel_id(
+                candidate.get("channel_id"),
+                candidate.get("channel_url"),
+                candidate.get("channel_name"),
+            )
+            if channel_id:
+                return channel_id, f"candidate_{index}+{method}"
+
+        return None, "unresolved"
+
     @staticmethod
     def extract_video_id(video_url: str | None) -> str | None:
         if not video_url:

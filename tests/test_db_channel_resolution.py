@@ -64,6 +64,27 @@ class ChannelResolutionTests(unittest.TestCase):
         self.assertEqual(resolved_id, "UCFOOD")
         self.assertEqual(method, "channel_name_token")
 
+    def test_resolve_channel_candidates_accepts_any_tracked_collab_channel(self) -> None:
+        self._insert_channel("UCFOLLOWED", "Followed Channel", "followed")
+
+        resolved_id, method = self.db.resolve_channel_candidates(
+            [
+                {
+                    "channel_id": "unfollowed",
+                    "channel_url": "https://www.youtube.com/@unfollowed",
+                    "channel_name": "Unfollowed Channel",
+                },
+                {
+                    "channel_id": "followed",
+                    "channel_url": "https://www.youtube.com/@followed",
+                    "channel_name": "Followed Channel",
+                },
+            ]
+        )
+
+        self.assertEqual(resolved_id, "UCFOLLOWED")
+        self.assertEqual(method, "candidate_2+direct")
+
 
 if __name__ == "__main__":
     unittest.main()
